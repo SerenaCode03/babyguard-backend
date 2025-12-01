@@ -1,61 +1,141 @@
-import base64, io
-from typing import Optional, List
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+import io
+import base64
+from fastapi import FastAPI, UploadFile, File
+from fastapi.responses import JSONResponse
 from PIL import Image
+import torch
 
-# ----- FastAPI app -----
-app = FastAPI(title="BabyGuard Grad-CAM API (MVP)", version="0.1")
+from model_definitions.pose_model import load_pose_model
+from model_definitions.expression_model import load_expression_model
+from model_definitions.cry_model import load_cry_model
 
-# Allow your phone/app to call this API (you can restrict origins later)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # for demo; tighten later
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+from preprocess.pose_preprocess import preprocess_pose_image
+from preprocess.expression_preprocess import preprocess_expression_image
+from preprocess.cry_preprocess import preprocess_cry_audio
+
+from gradcam_utils import (
+    run_pose_gradcam,
+    run_expression_gradcam,
+    run_cry_gradcam_from_image
 )
 
-LABELS = ["asphyxia", "hungry", "normal", "pain"]
+app = FastAPI(title="BabyGuard Backend API")
 
-class GradcamRequest(BaseModel):
-    image: str                   # base64 PNG/JPEG of spectrogram or frame
-    mode: Optional[str] = "mel"  # optional: "mel" or "frame"
-    target_class: Optional[str] = None
+# --- Load all models at startup ---
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-class GradcamResponse(BaseModel):
-    probs: List[float]
-    top_label: str
-    top_index: int
-    heatmap_png: str             # base64 PNG (placeholder)
+# Unpack Pose components
+pose_model, pose_val_transform, pose_class_names, pose_target_layer = load_pose_model(device)
+expression_model, expr_val_transform, expression_class_names, expr_target_layer = load_expression_model(device)
+cry_model, cry_transform, cry_labels, cry_target_layer = load_cry_model(device)
 
-@app.get("/health")
-def health():
-    return {"status": "ok"}
 
-@app.post("/gradcam", response_model=GradcamResponse)
-def gradcam(payload: GradcamRequest):
-    # --- decode image just to validate payload (will raise if bad) ---
-    raw = base64.b64decode(payload.image)
-    _ = Image.open(io.BytesIO(raw)).convert("RGB")  # not used yet; just validation
+def pil_to_base64(img: Image.Image) -> str:
+    """Helper to convert PIL Image to Base64 string for JSON response"""
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode()
 
-    # --- DUMMY prediction for now (deterministic placeholder) ---
-    # Replace with your real model + Grad-CAM later.
-    probs = [0.10, 0.15, 0.65, 0.10]  # asphyxia, hungry, normal, pain
-    top_idx = int(max(range(len(probs)), key=lambda i: probs[i]))
 
-    # --- DUMMY heatmap: 1x1 transparent PNG (so your app pipeline works) ---
-    empty_png_b64 = base64.b64encode(
-        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
-        b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\x0cIDATx\x9cc```\x00\x00\x00\x04\x00\x01"
-        b"\x0b\xe7\x02\x9e\x00\x00\x00\x00IEND\xaeB`\x82"
-    ).decode("utf-8")
+@app.post("/predict/pose")
+async def predict_pose(file: UploadFile = File(...)):
+    try:
+        # 1. Read bytes and convert to PIL
+        image_bytes = await file.read()
+        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
-    return GradcamResponse(
-        probs=probs,
-        top_label=LABELS[top_idx],
-        top_index=top_idx,
-        heatmap_png=empty_png_b64,
-    )
+        # 2. Preprocess (Pass the transform loaded from load_pose_model)
+        input_tensor = preprocess_pose_image(image, pose_val_transform, device)
 
+        # 3. Run Grad-CAM logic
+        # Note: Your run_pose_gradcam likely performs the inference internally. 
+        # If it doesn't, you might need: outputs = pose_model(input_tensor)
+        result = run_pose_gradcam(
+            model=pose_model,
+            device=device,
+            image_pil=image,
+            val_transform=pose_val_transform,
+            class_names=pose_class_names,
+            target_layer=pose_target_layer,
+        )
+
+        # 4. Convert overlay result to base64
+        overlay_b64 = pil_to_base64(result["overlay_image"])
+
+        return {
+            "label": result["label"],
+            "confidence": float(result["confidence"]), # Ensure float for JSON serialization
+            "explanation": result["explanation"],
+            "overlay_image": overlay_b64,
+        }
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc() # Print error to server logs for easier debugging
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.post("/predict/expression")
+async def predict_expression(file: UploadFile = File(...)):
+    try:
+        image_bytes = await file.read()
+        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+
+        # Preprocess
+        input_tensor = preprocess_expression_image(image, expr_val_transform, device)
+
+        result = run_expression_gradcam(
+            model=expression_model,
+            device=device,
+            image_pil=image,
+            val_transform=expr_val_transform,
+            class_names=expression_class_names,
+            target_layer=expr_target_layer,
+        )
+
+        overlay_b64 = pil_to_base64(result["overlay_image"])
+
+        return {
+            "label": result["label"],
+            "confidence": float(result["confidence"]),
+            "explanation": result["explanation"],
+            "overlay_image": overlay_b64,
+        }
+
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.post("/predict/cry")
+async def predict_cry(file: UploadFile = File(...)):
+    try:
+        audio_bytes = await file.read()
+
+        # Preprocess
+        input_tensor, extra_info = preprocess_cry_audio(audio_bytes, cry_transform, device)
+
+        result = run_cry_gradcam_from_image(
+            model=cry_model,
+            device=device,
+            input_tensor=input_tensor,
+            class_names=cry_labels,
+            target_layer=cry_target_layer,
+            extra_info=extra_info,
+        )
+
+        overlay_b64 = pil_to_base64(result["overlay_image"])
+
+        return {
+            "label": result["label"],
+            "confidence": float(result["confidence"]),
+            "explanation": result["explanation"],
+            "overlay_image": overlay_b64,
+        }
+
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/")
+def root():
+    return {"message": "BabyGuard Backend API Running"}
