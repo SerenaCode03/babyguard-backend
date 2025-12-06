@@ -1,9 +1,14 @@
 import io
 import base64
+import os
+import smtplib
+from email.mime.text import MIMEText
+from pydantic import BaseModel
 from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import JSONResponse
 from PIL import Image
 import torch
+from dotenv import load_dotenv  
 
 from model_definitions.pose_model import load_pose_model
 from model_definitions.expression_model import load_expression_model
@@ -18,6 +23,8 @@ from gradcam_utils import (
     run_expression_gradcam,
     run_cry_gradcam_from_image
 )
+
+load_dotenv()
 
 app = FastAPI(title="BabyGuard Backend API")
 
@@ -36,7 +43,63 @@ def pil_to_base64(img: Image.Image) -> str:
     img.save(buffer, format="PNG")
     return base64.b64encode(buffer.getvalue()).decode()
 
+class RiskEmailRequest(BaseModel):
+  to_email: str
+  risk_level: str
+  sleep_label: str
+  expr_label: str
+  cry_label: str
+  summary: str   # already-composed summary text from Flutter
 
+
+def send_risk_email(req: RiskEmailRequest):
+  """Send a simple text-only risk alert email to parent."""
+  subject = f"BabyGuard Alert: {req.risk_level.upper()} risk detected"
+
+  body = (
+    f"Dear Parent,\n\n"
+    f"BabyGuard has detected a {req.risk_level.upper()} risk event.\n\n"
+    f"Detected anomalies:\n"
+    f"- Sleeping posture: {req.sleep_label}\n"
+    f"- Facial expression: {req.expr_label}\n"
+    f"- Cry pattern: {req.cry_label}\n\n"
+    f"Summary:\n{req.summary}\n\n"
+    f"This email was sent automatically by the BabyGuard monitoring system."
+  )
+
+  msg = MIMEText(body)
+  from_addr = os.getenv("EMAIL_FROM") or os.getenv("EMAIL_USER") or "babyguard@example.com"
+  msg["Subject"] = subject
+  msg["From"] = from_addr
+  msg["To"] = req.to_email
+
+  smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+  smtp_port = int(os.getenv("SMTP_PORT", "587"))
+  smtp_user = os.getenv("EMAIL_USER")
+  smtp_pass = os.getenv("EMAIL_PASS")
+
+  if not smtp_user or not smtp_pass:
+    raise RuntimeError("Email credentials not configured. Set EMAIL_USER and EMAIL_PASS in .env")
+
+  with smtplib.SMTP(smtp_server, smtp_port) as server:
+    server.starttls()
+    server.login(smtp_user, smtp_pass)
+    server.send_message(msg)
+
+
+@app.post("/notify/risk_email")
+def notify_risk_email(req: RiskEmailRequest):
+  """
+  Called by Flutter when risk level / labels change and shouldSendToCloud == true.
+  Sends a plain-text email alert to the parent.
+  """
+  try:
+    send_risk_email(req)
+    return {"status": "ok"}
+  except Exception as e:
+    print(f"[EMAIL] Error sending risk email: {e}")
+    return JSONResponse(status_code=500, content={"status": "error", "detail": str(e)})
+  
 @app.post("/predict/pose")
 async def predict_pose(file: UploadFile = File(...)):
     try:
