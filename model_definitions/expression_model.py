@@ -2,7 +2,7 @@
 import torch
 import torch.nn as nn
 from functools import lru_cache
-from torchvision.models import mobilenet_v3_small
+from torchvision.models import mobilenet_v3_small, MobileNet_V3_Small_Weights
 from preprocess.expression_preprocess import EXPR_TRANSFORM 
 
 # Match your class order used in Flutter / risk scoring
@@ -24,7 +24,7 @@ def build_finetune_mobilenetv3_small(
     """
     # We don't need pretrained weights here, because we will load your fine-tuned
     # state_dict right after. So weights=None is fine.
-    model = mobilenet_v3_small(weights=None)
+    model = mobilenet_v3_small(weights=MobileNet_V3_Small_Weights.DEFAULT)
 
     # Replace classifier head EXACTLY as in your training code
     model.classifier = nn.Sequential(

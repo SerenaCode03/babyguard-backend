@@ -228,7 +228,7 @@ def explain_expression_prediction(label: str, cam_array: np.ndarray) -> str:
     label_lower = label.lower()
     if "distressed" in label_lower:
         return (
-            f"The model detected **distress**, focusing on the {region}, "
+            f"The model detected **distressed**, focusing on the {region}, "
             f"where discomfort cues such as tension, frowning, or crying "
             f"typically appear in infants."
         )

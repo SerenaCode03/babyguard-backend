@@ -14,7 +14,7 @@ def build_finetune_efficientnet_b0(num_classes: int = 2) -> nn.Module:
     Rebuilds the SAME architecture you used during training.
     For inference we don't care about requires_grad, only the layer shapes.
     """
-    model = efficientnet_b0(weights=None)
+    model = efficientnet_b0(weights=EfficientNet_B0_Weights.DEFAULT)
 
     # Replace classifier head to match num_classes
     in_features = model.classifier[1].in_features
