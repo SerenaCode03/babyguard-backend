@@ -1,3 +1,4 @@
+#app.py
 import io
 import base64
 import os
@@ -27,11 +28,8 @@ from gradcam_utils import (
 load_dotenv()
 
 app = FastAPI(title="BabyGuard Backend API")
-
-# --- Load all models at startup ---
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Unpack Pose components
 pose_model, pose_val_transform, pose_class_names, pose_target_layer = load_pose_model(device)
 expression_model, expr_val_transform, expression_class_names, expr_target_layer = load_expression_model(device)
 cry_model, cry_transform, cry_labels, cry_target_layer = load_cry_model(device)
@@ -49,7 +47,7 @@ class RiskEmailRequest(BaseModel):
   sleep_label: str
   expr_label: str
   cry_label: str
-  summary: str   # already-composed summary text from Flutter
+  summary: str   
 
 
 def send_risk_email(req: RiskEmailRequest):
@@ -89,10 +87,6 @@ def send_risk_email(req: RiskEmailRequest):
 
 @app.post("/notify/risk_email")
 def notify_risk_email(req: RiskEmailRequest):
-  """
-  Called by Flutter when risk level / labels change and shouldSendToCloud == true.
-  Sends a plain-text email alert to the parent.
-  """
   try:
     send_risk_email(req)
     return {"status": "ok"}
@@ -103,16 +97,10 @@ def notify_risk_email(req: RiskEmailRequest):
 @app.post("/predict/pose")
 async def predict_pose(file: UploadFile = File(...)):
     try:
-        # 1. Read bytes and convert to PIL
         image_bytes = await file.read()
         image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-
-        # 2. Preprocess (Pass the transform loaded from load_pose_model)
         input_tensor = preprocess_pose_image(image, pose_val_transform, device)
 
-        # 3. Run Grad-CAM logic
-        # Note: Your run_pose_gradcam likely performs the inference internally. 
-        # If it doesn't, you might need: outputs = pose_model(input_tensor)
         result = run_pose_gradcam(
             model=pose_model,
             device=device,
@@ -121,20 +109,16 @@ async def predict_pose(file: UploadFile = File(...)):
             class_names=pose_class_names,
             target_layer=pose_target_layer,
         )
-
-        # 4. Convert overlay result to base64
         overlay_b64 = pil_to_base64(result["overlay_image"])
 
         return {
             "label": result["label"],
-            "confidence": float(result["confidence"]), # Ensure float for JSON serialization
+            "confidence": float(result["confidence"]), 
             "explanation": result["explanation"],
             "overlay_image": overlay_b64,
         }
 
     except Exception as e:
-        import traceback
-        traceback.print_exc() # Print error to server logs for easier debugging
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
@@ -143,8 +127,6 @@ async def predict_expression(file: UploadFile = File(...)):
     try:
         image_bytes = await file.read()
         image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-
-        # Preprocess
         input_tensor = preprocess_expression_image(image, expr_val_transform, device)
 
         result = run_expression_gradcam(
@@ -173,8 +155,6 @@ async def predict_expression(file: UploadFile = File(...)):
 async def predict_cry(file: UploadFile = File(...)):
     try:
         audio_bytes = await file.read()
-
-        # Preprocess
         input_tensor, extra_info = preprocess_cry_audio(audio_bytes, cry_transform, device)
 
         result = run_cry_gradcam_from_image(
